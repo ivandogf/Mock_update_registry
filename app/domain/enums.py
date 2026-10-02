@@ -1,0 +1,36 @@
+"""Persisted state and scenario names."""
+
+from enum import StrEnum
+
+
+class PackageStatus(StrEnum):
+    DRAFT = "DRAFT"
+    PUBLISHED = "PUBLISHED"
+
+
+class TemporaryStorageState(StrEnum):
+    WRITE = "WRITE"
+    SEALED = "SEALED"
+    VERIFIED = "VERIFIED"
+    REJECTED = "REJECTED"
+
+
+class UpdateSessionState(StrEnum):
+    IDLE = "IDLE"
+    CHECKING = "CHECKING"
+    DOWNLOADING = "DOWNLOADING"
+    VERIFYING = "VERIFYING"
+    INSTALLING = "INSTALLING"
+    COMPLETED = "COMPLETED"
+    NO_UPDATE = "NO_UPDATE"
+    REJECTED = "REJECTED"
+    FAILED = "FAILED"
+    ROLLING_BACK = "ROLLING_BACK"
+    ROLLED_BACK = "ROLLED_BACK"
+
+
+class ScenarioType(StrEnum):
+    CORRUPTED_PACKAGE = "CORRUPTED_PACKAGE"
+    INVALID_SIGNATURE = "INVALID_SIGNATURE"
+    OUTDATED_VERSION = "OUTDATED_VERSION"
+    INSTALLATION_FAILURE = "INSTALLATION_FAILURE"

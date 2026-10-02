@@ -1,0 +1,1 @@
+"""Domain states and rules."""

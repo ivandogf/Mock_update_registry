@@ -1,0 +1,1 @@
+"""Filesystem and cryptography adapters."""
