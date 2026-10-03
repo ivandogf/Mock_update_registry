@@ -1,10 +1,17 @@
-"""FastAPI entry point. Feature routers are added in later stages."""
+"""FastAPI entry point for the training registry."""
 
 from fastapi import FastAPI
 
 from app.api import devices, packages, updates
 
-app = FastAPI(title="Mock Update Registry", version="0.1.0")
+app = FastAPI(
+    title="Mock Update Registry",
+    version="0.1.0",
+    description=(
+        "Учебный реестр обновлений. Для публикации укажите заголовок "
+        "X-Registry-Role: publisher. Это модель роли, без проверки личности."
+    ),
+)
 app.include_router(packages.router)
 app.include_router(devices.router)
 app.include_router(updates.router)

@@ -1,1 +1,112 @@
-"""Filesystem operations will be implemented with package storage."""
+"""Safe local storage for published package bytes."""
+
+import os
+import base64
+import json
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+from uuid import UUID
+
+from app.config import STORAGE_ROOT
+
+
+class ServerFileStore:
+    def __init__(self, root: Path = STORAGE_ROOT) -> None:
+        self.root = root.resolve()
+        self.server_dir = self.root / "server"
+
+    def _path(self, storage_key: str) -> Path:
+        path = (self.root / storage_key).resolve()
+        if not path.is_relative_to(self.server_dir) or path == self.server_dir:
+            raise ValueError("Invalid server storage key")
+        return path
+
+    def save(self, package_id: UUID, content: bytes) -> str:
+        storage_key = f"server/{package_id.hex}.pkg"
+        destination = self._path(storage_key)
+        self.server_dir.mkdir(parents=True, exist_ok=True)
+        temp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=self.server_dir, delete=False) as temp_file:
+                temp_path = Path(temp_file.name)
+                temp_file.write(content)
+            os.replace(temp_path, destination)
+        finally:
+            if temp_path is not None:
+                temp_path.unlink(missing_ok=True)
+        return storage_key
+
+    def read(self, storage_key: str) -> bytes:
+        return self._path(storage_key).read_bytes()
+
+    def delete(self, storage_key: str) -> None:
+        self._path(storage_key).unlink(missing_ok=True)
+
+
+@dataclass(frozen=True)
+class TemporaryBundle:
+    content: bytes
+    manifest_bytes: bytes
+    signature: bytes
+    signing_key_id: str
+
+
+class TemporaryFileStore:
+    def __init__(self, root: Path = STORAGE_ROOT) -> None:
+        self.root = root.resolve()
+        self.directory = self.root / "temporary"
+
+    def _path(self, key: str) -> Path:
+        path = (self.root / key).resolve()
+        if path.parent != self.directory or path.suffix != ".pkg":
+            raise ValueError("Invalid temporary storage key")
+        return path
+
+    def create(self, session_id: UUID, manifest: bytes, signature: bytes, key_id: str) -> str:
+        key = f"temporary/{session_id.hex}.pkg"
+        path = self._path(key)
+        self.directory.mkdir(parents=True, exist_ok=True)
+        with path.open("xb"):
+            pass
+        try:
+            with path.with_suffix(".meta").open("x", encoding="utf-8") as file:
+                json.dump({
+                    "manifest": base64.b64encode(manifest).decode("ascii"),
+                    "signature": base64.b64encode(signature).decode("ascii"),
+                    "signing_key_id": key_id,
+                }, file)
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
+        return key
+
+    def append(self, key: str, content: bytes, expected_size: int) -> None:
+        with self._path(key).open("r+b") as file:
+            file.seek(0, os.SEEK_END)
+            if file.tell() != expected_size:
+                raise ValueError("Temporary file size differs from stored byte count")
+            try:
+                file.write(content)
+                file.flush()
+            except BaseException:
+                file.truncate(expected_size)
+                raise
+
+    def size(self, key: str) -> int:
+        return self._path(key).stat().st_size
+
+    def read(self, key: str) -> TemporaryBundle:
+        path = self._path(key)
+        metadata = json.loads(path.with_suffix(".meta").read_text(encoding="utf-8"))
+        return TemporaryBundle(
+            content=path.read_bytes(),
+            manifest_bytes=base64.b64decode(metadata["manifest"], validate=True),
+            signature=base64.b64decode(metadata["signature"], validate=True),
+            signing_key_id=metadata["signing_key_id"],
+        )
+
+    def delete(self, key: str) -> None:
+        path = self._path(key)
+        path.unlink(missing_ok=True)
+        path.with_suffix(".meta").unlink(missing_ok=True)

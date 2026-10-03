@@ -10,7 +10,10 @@ requires-python = ">=3.11"
 dependencies = [
     "alembic>=1.13,<2",
     "asyncpg>=0.29,<1",
+    "cryptography>=44,<48",
     "fastapi>=0.115,<1",
+    "packaging>=24,<27",
+    "python-multipart>=0.0.20,<1",
     "python-dotenv>=1.0,<2",
     "sqlalchemy[asyncio]>=2.0,<3",
     "uvicorn[standard]>=0.30,<1",
