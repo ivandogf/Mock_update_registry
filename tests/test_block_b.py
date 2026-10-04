@@ -101,8 +101,28 @@ def test_downloader_states_and_failures(tmp_path, mode):
                     with pytest.raises(DownloadConflict):
                         await downloader.download(device_id)
                     await storage.set_verification_result(update_id, True, StorageActor.VERIFIER)
+                    with pytest.raises(AccessDeniedError):
+                        await storage.read(update_id, StorageActor.VERIFIER)
+                    await session.rollback()
+                    # A denied operation must persist its audit without committing
+                    # the caller's still-pending VERIFIED transition.
+                    async with SessionFactory() as observer:
+                        persisted_storage = await observer.get(TemporaryStorage, update_id)
+                        assert persisted_storage.state == "SEALED"
+                        persisted_events = await MonitorService(observer).events_for_session(update_id)
+                        denied = [e for e in persisted_events if e.event_type == "ACCESS_DENIED"]
+                        assert len(denied) == 5
+                        assert denied[-1].level == "WARNING"
+                        assert denied[-1].details == {
+                            "session_id": str(update_id), "actor": "verifier",
+                            "operation": "read", "storage_state": "VERIFIED",
+                        }
+                        assert "PACKAGE_VERIFIED" not in [e.event_type for e in persisted_events]
+                    await storage.set_verification_result(update_id, True, StorageActor.VERIFIER)
                     await session.commit()
                     assert (await storage.read(update_id, StorageActor.INSTALLER)).content == payload
+                    with pytest.raises(AccessDeniedError):
+                        await storage.read(update_id, StorageActor.VERIFIER)
                     await storage.cleanup(update_id, StorageActor.MANAGER)
                     await session.commit()
                     with pytest.raises(TemporaryStorageError):
@@ -120,6 +140,66 @@ def test_downloader_states_and_failures(tmp_path, mode):
                     else:
                         assert row is None
                 await session.rollback()
+        finally:
+            if product_id is not None:
+                await remove_test_product(product_id)
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+def test_all_storage_denials_have_durable_audit(tmp_path):
+    async def exercise():
+        await engine.dispose()
+        product_id = None
+        try:
+            async with SessionFactory() as session:
+                product_id = uuid4()
+                device_id = uuid4()
+                update_id = uuid4()
+                session.add(Product(id=product_id, name=f"denials-{uuid4().hex}", target="test"))
+                await session.flush()
+                session.add(Device(id=device_id, name=f"denials-device-{uuid4().hex}", product_id=product_id, target="test"))
+                await session.flush()
+                session.add(UpdateSession(id=update_id, device_id=device_id, state="DOWNLOADING"))
+                await session.commit()
+                storage = TemporaryStorageService(session, TemporaryFileStore(tmp_path))
+                denials = 0
+
+                async def deny(operation, actor, state, call):
+                    nonlocal denials
+                    with pytest.raises(AccessDeniedError):
+                        await call
+                    await session.rollback()
+                    denials += 1
+                    async with SessionFactory() as observer:
+                        events = await MonitorService(observer).events_for_session(update_id)
+                        denied = [e for e in events if e.event_type == "ACCESS_DENIED"]
+                        assert len(denied) == denials
+                        assert denied[-1].component == "TemporaryStorageService"
+                        assert denied[-1].details == {
+                            "session_id": str(update_id), "actor": actor,
+                            "operation": operation, "storage_state": state,
+                        }
+
+                await deny("write", "installer", "WRITE", storage.create(
+                    update_id, b"manifest", b"signature", "key", StorageActor.INSTALLER,
+                ))
+                await storage.create(update_id, b"manifest", b"signature", "key", StorageActor.DOWNLOADER)
+                await storage.append(update_id, b"data", StorageActor.DOWNLOADER)
+                await session.commit()
+                await deny("write", "installer", "WRITE", storage.append(update_id, b"bad", StorageActor.INSTALLER))
+                await deny("seal", "verifier", "WRITE", storage.seal(update_id, StorageActor.VERIFIER))
+                await deny("read", "installer", "WRITE", storage.read(update_id, StorageActor.INSTALLER))
+                await deny("cleanup", "installer", "WRITE", storage.cleanup(update_id, StorageActor.INSTALLER))
+                await storage.seal(update_id, StorageActor.DOWNLOADER)
+                await session.commit()
+                await deny("verify", "downloader", "SEALED", storage.set_verification_result(
+                    update_id, True, StorageActor.DOWNLOADER,
+                ))
+                assert (await storage.read(update_id, StorageActor.VERIFIER)).content == b"data"
+                await storage.cleanup(update_id, StorageActor.MANAGER)
+                await session.commit()
         finally:
             if product_id is not None:
                 await remove_test_product(product_id)

@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import TemporaryStorage, UpdateSession
 from app.domain.enums import TemporaryStorageState
 from app.domain.rules import (
-    StorageActor, require_storage_access, require_storage_transition,
+    AccessDeniedError, StorageActor, require_storage_access, require_storage_transition,
 )
 from app.infrastructure.files import TemporaryBundle, TemporaryFileStore
 from app.services.monitor import MonitorService
@@ -42,11 +42,23 @@ class TemporaryStorageService:
     def _event(self, session_id: UUID, event: str, message: str) -> None:
         self.monitor.record(event, message, component="TemporaryStorageService", session_id=session_id)
 
+    async def _require_access(
+        self, session_id: UUID, actor: StorageActor, operation: str, state: str,
+    ) -> None:
+        try:
+            require_storage_access(actor, operation, state)
+        except AccessDeniedError as exc:
+            await self.monitor.access_denied(
+                session_id, actor=actor.value, operation=operation,
+                storage_state=state, message=str(exc),
+            )
+            raise
+
     async def create(
         self, session_id: UUID, manifest_bytes: bytes, signature: bytes,
         signing_key_id: str, actor: StorageActor,
     ) -> TemporaryStorage:
-        require_storage_access(actor, "write", TemporaryStorageState.WRITE)
+        await self._require_access(session_id, actor, "write", TemporaryStorageState.WRITE)
         update = await self.session.get(UpdateSession, session_id)
         if update is None or update.state != "DOWNLOADING":
             raise TemporaryStorageError("Storage can only be created for a downloading session")
@@ -58,14 +70,14 @@ class TemporaryStorageService:
         self._event(session_id, "STORAGE_CREATED", "Temporary storage opened for writing")
         try:
             await self.session.flush()
-        except BaseException:
+        except Exception:
             self.files.delete(key)
             raise
         return row
 
     async def append(self, session_id: UUID, content: bytes, actor: StorageActor) -> TemporaryStorage:
         row = await self._locked(session_id)
-        require_storage_access(actor, "write", row.state)
+        await self._require_access(session_id, actor, "write", row.state)
         if row.bytes_written + len(content) > self.MAX_BYTES:
             raise TemporaryStorageError("Temporary package exceeds 16 MiB")
         self.files.append(row.storage_key, content, row.bytes_written)
@@ -75,7 +87,7 @@ class TemporaryStorageService:
 
     async def seal(self, session_id: UUID, actor: StorageActor) -> TemporaryStorage:
         row = await self._locked(session_id)
-        require_storage_access(actor, "seal", row.state)
+        await self._require_access(session_id, actor, "seal", row.state)
         require_storage_transition(row.state, "SEALED")
         if row.bytes_written == 0 or self.files.size(row.storage_key) != row.bytes_written:
             raise TemporaryStorageError("Cannot seal empty or incomplete storage")
@@ -87,7 +99,7 @@ class TemporaryStorageService:
 
     async def read(self, session_id: UUID, actor: StorageActor) -> TemporaryBundle:
         row = await self._locked(session_id)
-        require_storage_access(actor, "read", row.state)
+        await self._require_access(session_id, actor, "read", row.state)
         bundle = self.files.read(row.storage_key)
         if len(bundle.content) != row.bytes_written:
             raise TemporaryStorageError("Temporary file size differs from stored byte count")
@@ -97,7 +109,7 @@ class TemporaryStorageService:
         self, session_id: UUID, verified: bool, actor: StorageActor,
     ) -> TemporaryStorage:
         row = await self._locked(session_id)
-        require_storage_access(actor, "verify", row.state)
+        await self._require_access(session_id, actor, "verify", row.state)
         target = "VERIFIED" if verified else "REJECTED"
         require_storage_transition(row.state, target)
         row.state = target
@@ -115,7 +127,7 @@ class TemporaryStorageService:
         row = result.scalar_one_or_none()
         if row is None:
             return
-        require_storage_access(actor, "cleanup", row.state)
+        await self._require_access(session_id, actor, "cleanup", row.state)
         if row.cleaned_at is not None:
             return
         self.files.delete(row.storage_key)

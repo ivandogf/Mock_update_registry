@@ -10,7 +10,7 @@ from app.api.packages import get_role
 from app.api.schemas import AuditEventRead, TemporaryStorageRead, UpdateSessionRead
 from app.db.models import TemporaryStorage, UpdateSession
 from app.db.session import get_session
-from app.domain.rules import RegistryAction, RegistryRole, require_access
+from app.domain.rules import AccessDeniedError, RegistryAction, RegistryRole
 from app.services.downloader import DownloadConflict, DownloaderService
 from app.services.gateway import ExternalNetworkGateway
 from app.services.monitor import MonitorService
@@ -33,7 +33,13 @@ async def download_update(
     session: Annotated[AsyncSession, Depends(get_session)],
     role: Annotated[RegistryRole, Depends(get_role)],
 ):
-    require_access(role, RegistryAction.READ_RELEASE)
+    try:
+        await MonitorService(session).require_access(
+            role, RegistryAction.READ_RELEASE, component="UpdatesAPI",
+            details={"device_id": str(device_id)},
+        )
+    except AccessDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     gateway = ExternalNetworkGateway(UpdateServerService(session))
     try:
         update = await DownloaderService(session, gateway).download(device_id)

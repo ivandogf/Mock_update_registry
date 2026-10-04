@@ -5,13 +5,14 @@ import json
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas import ManifestRead, PackageRead, ProductCreate, ProductRead
 from app.db.session import get_session
 from app.domain.rules import AccessDeniedError, RegistryRole
+from app.services.monitor import MonitorService
 from app.services.packages import (
     InvalidPackage,
     PackageRegistryService,
@@ -24,7 +25,9 @@ router = APIRouter(tags=["Packages"])
 MAX_PACKAGE_BYTES = 16 * 1024 * 1024
 
 
-def get_role(
+async def get_role(
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)],
     x_registry_role: Annotated[
         str,
         Header(description="Учебная роль: publisher или device; не подтверждает личность"),
@@ -33,6 +36,14 @@ def get_role(
     try:
         return RegistryRole(x_registry_role.lower())
     except ValueError as exc:
+        await MonitorService(session).access_denied(
+            actor=x_registry_role, operation="resolve_role", message="Unknown registry role",
+            component="RegistryAPI",
+            details={
+                "method": request.method, "path": request.url.path,
+                **{key: str(value) for key, value in request.path_params.items()},
+            },
+        )
         raise HTTPException(status_code=403, detail="Unknown registry role") from exc
 
 

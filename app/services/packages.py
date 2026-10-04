@@ -11,7 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Package, Product, ServerReleaseHead
-from app.domain.rules import RegistryAction, RegistryRole, require_access
+from app.domain.rules import RegistryAction, RegistryRole
 from app.infrastructure.crypto import TrainingSigner, sha256_hex
 from app.infrastructure.files import ServerFileStore
 from app.services.monitor import MonitorService
@@ -46,7 +46,10 @@ class PackageRegistryService:
         self.monitor = MonitorService(session)
 
     async def create_product(self, name: str, target: str, role: RegistryRole) -> Product:
-        require_access(role, RegistryAction.CREATE_PRODUCT)
+        await self.monitor.require_access(
+            role, RegistryAction.CREATE_PRODUCT, component="PackageRegistryService",
+            details={"product_name": name},
+        )
         product = Product(id=uuid4(), name=name.strip(), target=target.strip())
         if not product.name or not product.target:
             raise InvalidPackage("Product name and target are required")
@@ -73,7 +76,10 @@ class PackageRegistryService:
         content: bytes,
         role: RegistryRole,
     ) -> Package:
-        require_access(role, RegistryAction.PUBLISH_PACKAGE)
+        await self.monitor.require_access(
+            role, RegistryAction.PUBLISH_PACKAGE, component="PackageRegistryService",
+            details={"product_id": str(product_id)},
+        )
         version = version.strip()
         try:
             candidate_version = Version(version)
@@ -163,9 +169,13 @@ class UpdateServerService:
     def __init__(self, session: AsyncSession, files: ServerFileStore | None = None) -> None:
         self.session = session
         self.files = files or ServerFileStore()
+        self.monitor = MonitorService(session)
 
     async def list_packages(self, product_id: UUID, role: RegistryRole) -> list[Package]:
-        require_access(role, RegistryAction.READ_RELEASE)
+        await self.monitor.require_access(
+            role, RegistryAction.READ_RELEASE, component="UpdateServerService",
+            details={"product_id": str(product_id)},
+        )
         if await self.session.get(Product, product_id) is None:
             raise RegistryNotFound("Product not found")
         result = await self.session.execute(
@@ -176,29 +186,49 @@ class UpdateServerService:
         return list(result.scalars())
 
     async def latest(self, product_id: UUID, role: RegistryRole) -> Package:
-        require_access(role, RegistryAction.READ_RELEASE)
+        await self.monitor.require_access(
+            role, RegistryAction.READ_RELEASE, component="UpdateServerService",
+            details={"product_id": str(product_id)},
+        )
         if await self.session.get(Product, product_id) is None:
             raise RegistryNotFound("Product not found")
         head = await self.session.get(ServerReleaseHead, product_id)
         if head is None or head.current_package_id is None:
             raise NoPublishedRelease("No published package for this product")
-        return await self._published_package(head.current_package_id)
+        return await self._published_package(head.current_package_id, role)
 
     async def manifest(self, package_id: UUID, role: RegistryRole) -> Package:
-        require_access(role, RegistryAction.READ_RELEASE)
-        return await self._published_package(package_id)
+        await self.monitor.require_access(
+            role, RegistryAction.READ_RELEASE, component="UpdateServerService",
+            details={"package_id": str(package_id)},
+        )
+        return await self._published_package(package_id, role)
 
     async def download(self, package_id: UUID, role: RegistryRole) -> tuple[Package, bytes]:
-        require_access(role, RegistryAction.READ_RELEASE)
-        package = await self._published_package(package_id)
+        await self.monitor.require_access(
+            role, RegistryAction.READ_RELEASE, component="UpdateServerService",
+            details={"package_id": str(package_id)},
+        )
+        package = await self._published_package(package_id, role)
         try:
             content = self.files.read(package.storage_key)
         except FileNotFoundError as exc:
             raise RegistryNotFound("Package content is missing") from exc
         return package, content
 
-    async def _published_package(self, package_id: UUID) -> Package:
+    async def _published_package(self, package_id: UUID, role: RegistryRole) -> Package:
         package = await self.session.get(Package, package_id)
-        if package is None or package.status != "PUBLISHED":
+        if package is None:
+            raise RegistryNotFound("Published package not found")
+        if package.status != "PUBLISHED":
+            await self.monitor.access_denied(
+                actor=role.value, operation=RegistryAction.READ_RELEASE.value,
+                message="Access to an unpublished package is denied",
+                component="UpdateServerService",
+                details={
+                    "package_id": str(package_id), "product_id": str(package.product_id),
+                    "package_status": package.status, "reason": "not_published",
+                },
+            )
             raise RegistryNotFound("Published package not found")
         return package

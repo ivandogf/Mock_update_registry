@@ -29,13 +29,14 @@ def test_publish_latest_download_audit_and_access(tmp_path):
         files = ServerFileStore(tmp_path)
         signer = TrainingSigner(tmp_path / "signing_key.raw")
         product_id = None
+        denied_name = f"forbidden-{uuid4().hex}"
         storage_keys: list[str] = []
         try:
             async with SessionFactory() as session:
                 registry = PackageRegistryService(session, files, signer)
                 server = UpdateServerService(session, files)
                 with pytest.raises(AccessDeniedError):
-                    await registry.create_product("forbidden", "linux-x64", RegistryRole.DEVICE)
+                    await registry.create_product(denied_name, "linux-x64", RegistryRole.DEVICE)
 
                 product = await registry.create_product(
                     f"block-a-{uuid4().hex}", "linux-x64", RegistryRole.PUBLISHER
@@ -84,6 +85,12 @@ def test_publish_latest_download_audit_and_access(tmp_path):
                     "PACKAGE_PUBLISHED", "PACKAGE_PUBLISHED", "PRODUCT_CREATED"
                 ]
         finally:
+            async with SessionFactory() as cleanup:
+                await cleanup.execute(
+                    text("DELETE FROM audit_events WHERE details ->> 'product_name' = :name"),
+                    {"name": denied_name},
+                )
+                await cleanup.commit()
             if product_id is not None:
                 async with SessionFactory() as cleanup:
                     await cleanup.execute(
@@ -107,10 +114,10 @@ def test_http_publication_and_download():
     async def exercise() -> None:
         await engine.dispose()
         product_id = None
+        name = f"block-a-api-{uuid4().hex}"
         storage_keys: list[str] = []
         try:
             async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-                name = f"block-a-api-{uuid4().hex}"
                 denied = await client.post("/products", json={"name": name, "target": "linux-x64"})
                 assert denied.status_code == 403
 
@@ -143,6 +150,12 @@ def test_http_publication_and_download():
                 assert content.status_code == 200
                 assert content.content == b"api-package"
         finally:
+            async with SessionFactory() as cleanup:
+                await cleanup.execute(
+                    text("DELETE FROM audit_events WHERE details ->> 'product_name' = :name"),
+                    {"name": name},
+                )
+                await cleanup.commit()
             if product_id is not None:
                 async with SessionFactory() as cleanup:
                     storage_keys = list(

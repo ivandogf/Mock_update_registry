@@ -1,4 +1,4 @@
-"""Basic access rules. These roles model permissions, not user identity."""
+"""Definition of access rights"""
 
 from enum import StrEnum
 
@@ -48,7 +48,7 @@ def require_storage_access(actor: StorageActor, operation: str, state: str) -> N
         "write": actor == StorageActor.DOWNLOADER and state == TemporaryStorageState.WRITE,
         "seal": actor == StorageActor.DOWNLOADER and state == TemporaryStorageState.WRITE,
         "read": (
-            actor == StorageActor.VERIFIER and state in {TemporaryStorageState.SEALED, TemporaryStorageState.VERIFIED}
+            actor == StorageActor.VERIFIER and state == TemporaryStorageState.SEALED
         ) or (actor == StorageActor.INSTALLER and state == TemporaryStorageState.VERIFIED),
         "verify": actor == StorageActor.VERIFIER and state == TemporaryStorageState.SEALED,
         "cleanup": actor == StorageActor.MANAGER or (
