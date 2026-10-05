@@ -83,6 +83,11 @@ def require_update_transition(source: str, target: str) -> None:
         raise InvalidTransitionError(f"Invalid update transition: {source} -> {target}")
 
 
+def require_installation_ready(state: str, verification_result: str | None, storage_state: str | None) -> None:
+    if state != "VERIFYING" or verification_result != "PASSED" or storage_state != "VERIFIED":
+        raise AccessDeniedError("Installation requires VERIFYING, PASSED and VERIFIED temporary storage")
+
+
 ACTIVE_UPDATE_STATES = {
     UpdateSessionState.IDLE, UpdateSessionState.CHECKING, UpdateSessionState.DOWNLOADING,
     UpdateSessionState.VERIFYING, UpdateSessionState.INSTALLING, UpdateSessionState.ROLLING_BACK,

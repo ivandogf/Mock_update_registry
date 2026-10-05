@@ -124,3 +124,47 @@ class TemporaryFileStore:
         path = self._path(key)
         path.unlink(missing_ok=True)
         path.with_suffix(".meta").unlink(missing_ok=True)
+
+
+class DeviceFileStore:
+    """Local installed copies, isolated by device and installation session."""
+
+    def __init__(self, root: Path = STORAGE_ROOT) -> None:
+        self.root = root.resolve()
+        self.directory = self.root / "devices"
+
+    @staticmethod
+    def storage_key(device_id: UUID, session_id: UUID) -> str:
+        return f"devices/{device_id.hex}/{session_id.hex}.pkg"
+
+    def _path(self, key: str, device_id: UUID) -> Path:
+        device_dir = (self.directory / device_id.hex).resolve()
+        path = (self.root / key).resolve()
+        if not device_dir.is_relative_to(self.directory) or path.parent != device_dir or path.suffix != ".pkg":
+            raise ValueError("Invalid device storage key")
+        return path
+
+    def save(self, device_id: UUID, session_id: UUID, content: bytes) -> str:
+        key = self.storage_key(device_id, session_id)
+        destination = self._path(key, device_id)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists():
+            raise FileExistsError("This installation session already has a local copy")
+        staging: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=destination.parent, prefix="install-", delete=False) as file:
+                staging = Path(file.name)
+                file.write(content)
+                file.flush()
+                os.fsync(file.fileno())
+            os.replace(staging, destination)
+        finally:
+            if staging is not None:
+                staging.unlink(missing_ok=True)
+        return key
+
+    def read(self, key: str, device_id: UUID) -> bytes:
+        return self._path(key, device_id).read_bytes()
+
+    def delete(self, key: str, device_id: UUID) -> None:
+        self._path(key, device_id).unlink(missing_ok=True)

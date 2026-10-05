@@ -1,4 +1,4 @@
-"""Download staging, session status and audit events."""
+"""Update stages, full normal flow, rollback, session status and audit events."""
 
 from typing import Annotated
 from uuid import UUID
@@ -17,6 +17,7 @@ from app.services.monitor import MonitorService
 from app.services.packages import RegistryNotFound, UpdateServerService
 from app.services.temporary_storage import TemporaryStorageError
 from app.services.verifier import VerificationConflict, VerifierService
+from app.services.update_manager import UpdateConflict, UpdateManagerService
 
 router = APIRouter(tags=["Updates"])
 
@@ -71,6 +72,63 @@ async def verify_update(
     except RegistryNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except (AccessDeniedError, VerificationConflict, TemporaryStorageError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return await session_response(session, update)
+
+
+async def authorize_update(session: AsyncSession, role: RegistryRole, **details) -> None:
+    try:
+        await MonitorService(session).require_access(
+            role, RegistryAction.READ_RELEASE, component="UpdatesAPI", details=details,
+        )
+    except AccessDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@router.post("/updates/{session_id}/install", response_model=UpdateSessionRead)
+async def install_update(
+    session_id: UUID, session: Annotated[AsyncSession, Depends(get_session)],
+    role: Annotated[RegistryRole, Depends(get_role)],
+):
+    """Install an already VERIFIED package; automatically roll back installation errors."""
+    await authorize_update(session, role, session_id=str(session_id))
+    try:
+        update = await UpdateManagerService(session).install(session_id)
+    except RegistryNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except UpdateConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return await session_response(session, update)
+
+
+@router.post("/updates/{session_id}/rollback", response_model=UpdateSessionRead)
+async def rollback_update(
+    session_id: UUID, session: Annotated[AsyncSession, Depends(get_session)],
+    role: Annotated[RegistryRole, Depends(get_role)],
+):
+    """Restore the session's original pointers from trusted local copies, without server access."""
+    await authorize_update(session, role, session_id=str(session_id))
+    try:
+        update = await UpdateManagerService(session).rollback(session_id)
+    except RegistryNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except UpdateConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return await session_response(session, update)
+
+
+@router.post("/devices/{device_id}/updates/run", response_model=UpdateSessionRead, status_code=201)
+async def run_update(
+    device_id: UUID, session: Annotated[AsyncSession, Depends(get_session)],
+    role: Annotated[RegistryRole, Depends(get_role)],
+):
+    """Download, verify and install a normal update. Each service keeps its own responsibility."""
+    await authorize_update(session, role, device_id=str(device_id))
+    try:
+        update = await UpdateManagerService(session).run(device_id)
+    except RegistryNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (DownloadConflict, UpdateConflict) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return await session_response(session, update)
 
