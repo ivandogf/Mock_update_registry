@@ -28,16 +28,16 @@ MAX_PACKAGE_BYTES = 16 * 1024 * 1024
 async def get_role(
     request: Request,
     session: Annotated[AsyncSession, Depends(get_session)],
-    x_registry_role: Annotated[
+    role_header: Annotated[
         str,
-        Header(description="Учебная роль: publisher или device; не подтверждает личность"),
+        Header(alias="Role", description="Учебная роль: publisher или device; не подтверждает личность"),
     ] = "device",
 ) -> RegistryRole:
     try:
-        return RegistryRole(x_registry_role.lower())
+        return RegistryRole(role_header.lower())
     except ValueError as exc:
         await MonitorService(session).access_denied(
-            actor=x_registry_role, operation="resolve_role", message="Unknown registry role",
+            actor=role_header, operation="resolve_role", message="Unknown registry role",
             component="RegistryAPI",
             details={
                 "method": request.method, "path": request.url.path,

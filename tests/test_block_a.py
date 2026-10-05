@@ -124,7 +124,7 @@ def test_http_publication_and_download():
                 created = await client.post(
                     "/products",
                     json={"name": name, "target": "linux-x64"},
-                    headers={"X-Registry-Role": "publisher"},
+                    headers={"Role": "publisher"},
                 )
                 assert created.status_code == 201, created.text
                 product_id = UUID(created.json()["id"])
@@ -133,7 +133,7 @@ def test_http_publication_and_download():
                     f"/products/{product_id}/packages",
                     data={"version": "1.0.0"},
                     files={"file": ("demo.pkg", b"api-package", "application/octet-stream")},
-                    headers={"X-Registry-Role": "publisher"},
+                    headers={"Role": "publisher"},
                 )
                 assert published.status_code == 201, published.text
                 package_id = published.json()["id"]

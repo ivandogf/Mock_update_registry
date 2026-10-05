@@ -1,6 +1,7 @@
 """Download through Gateway and leave a sealed package for Verifier."""
 
 from datetime import datetime, timezone
+from collections.abc import Callable
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
@@ -24,11 +25,13 @@ class DownloaderService:
     def __init__(
         self, session: AsyncSession, gateway: ExternalNetworkGateway,
         storage: TemporaryStorageService | None = None,
+        *, on_session_started: Callable[[UpdateSession], None] | None = None,
     ) -> None:
         self.session = session
         self.gateway = gateway
         self.storage = storage or TemporaryStorageService(session)
         self.monitor = MonitorService(session)
+        self.on_session_started = on_session_started
 
     def _transition(self, update: UpdateSession, state: str) -> None:
         require_update_transition(update.state, state)
@@ -37,7 +40,7 @@ class DownloaderService:
     def _event(self, session_id: UUID, event: str, message: str, level: str = "INFO") -> None:
         self.monitor.record(event, message, component="DownloaderService", level=level, session_id=session_id)
 
-    async def download(self, device_id: UUID) -> UpdateSession:
+    async def download(self, device_id: UUID, *, package_id: UUID | None = None) -> UpdateSession:
         device = await self.session.get(Device, device_id, with_for_update=True)
         if device is None:
             raise RegistryNotFound("Device not found")
@@ -60,22 +63,27 @@ class DownloaderService:
         )
         self.session.add(update)
         await self.session.flush()
+        if self.on_session_started is not None:
+            self.on_session_started(update)
         self._transition(update, "CHECKING")
         self._event(session_id, "UPDATE_CHECK_STARTED", "Checking the update server")
         await self.session.commit()
         try:
             try:
-                latest = await self.gateway.latest(product_id)
+                latest = (
+                    await self.gateway.manifest(package_id) if package_id is not None
+                    else await self.gateway.latest(product_id)
+                )
             except NoPublishedRelease:
                 latest = None
-            if latest is None or latest.id == current:
+            if latest is None or (package_id is None and latest.id == current):
                 self._transition(update, "NO_UPDATE")
                 update.finished_at = datetime.now(timezone.utc)
                 self._event(session_id, "NO_UPDATE", "No new published package is available")
                 await self.session.commit()
                 return update
             target_id = latest.id
-            manifest = await self.gateway.manifest(target_id)
+            manifest = latest if package_id is not None else await self.gateway.manifest(target_id)
             if manifest.id != target_id or manifest.product_id != product_id:
                 raise TemporaryStorageError("Server returned a package for another product")
             update.target_package_id = target_id

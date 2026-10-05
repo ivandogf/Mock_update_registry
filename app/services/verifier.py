@@ -140,6 +140,9 @@ class VerifierService:
             # Emits exactly one PACKAGE_VERIFIED/PACKAGE_REJECTED in this transaction.
             await self.storage.set_verification_result(session_id, passed, StorageActor.VERIFIER)
             await self.session.commit()
+            if not passed:
+                await self.storage.cleanup_finished(session_id)
+                await self.session.refresh(update)
             return update
         except Exception:
             await self.session.rollback()

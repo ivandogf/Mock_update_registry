@@ -9,7 +9,7 @@ app = FastAPI(
     version="0.1.0",
     description=(
         "Учебный реестр обновлений. Для публикации укажите заголовок "
-        "X-Registry-Role: publisher. Это модель роли, без проверки личности."
+        "Role: publisher. Это модель роли, без проверки личности."
     ),
 )
 app.include_router(packages.router)
@@ -20,3 +20,7 @@ app.include_router(updates.router)
 @app.get("/health", tags=["System"])
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+
+#python -m uvicorn app.main:app --reload

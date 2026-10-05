@@ -24,6 +24,7 @@ from app.services.installer import InstallerService
 from app.services.monitor import MonitorService
 from app.services.packages import PackageRegistryService, UpdateServerService
 from app.services.temporary_storage import TemporaryStorageService
+from app.services.temporary_storage import TemporaryStorageError
 from app.services.update_manager import UpdateConflict, UpdateManagerService
 from app.services.verifier import VerifierService
 from tests.test_block_b import remove_test_product
@@ -62,6 +63,7 @@ async def device_rig(tmp_path):
                 package = await publish(version)
                 update = await manager.run(device_id)
                 assert update.state == "COMPLETED"
+                await assert_temporary_cleaned(session, device_files.root, update.id)
                 return package, update
 
             async def verified_release(version):
@@ -99,6 +101,13 @@ async def event_types(session_id):
         return [event.event_type for event in await MonitorService(observer).events_for_session(session_id)]
 
 
+async def assert_temporary_cleaned(session, root, session_id):
+    row = await session.get(TemporaryStorage, session_id, populate_existing=True)
+    assert row.cleaned_at is not None
+    path = root / row.storage_key
+    assert not path.exists() and not path.with_suffix(".meta").exists()
+
+
 def prevent_network(monkeypatch):
     async def blocked(*args, **kwargs):
         raise AssertionError("Rollback must not contact the server")
@@ -112,7 +121,7 @@ def test_install_and_offline_rollback_preserve_both_originals(tmp_path, monkeypa
         async with device_rig(tmp_path) as rig:
             first, first_update = await rig.install_release("1.0")
             await assert_device(rig, first.id, None, trusted_ids=[first.id])
-            assert (await event_types(first_update.id))[-3:] == ["INSTALL_STARTED", "DEVICE_CURRENT_UPDATED", "INSTALL_COMPLETED"]
+            assert (await event_types(first_update.id))[-4:] == ["INSTALL_STARTED", "DEVICE_CURRENT_UPDATED", "INSTALL_COMPLETED", "STORAGE_CLEANED"]
             second = await rig.publish("2.0")
             # Publishing changes only server heads; the device still has version 1.0.
             await assert_device(rig, first.id, None, trusted_ids=[first.id])
@@ -171,12 +180,13 @@ def test_automatic_rollback_uses_successfully_installed_current(tmp_path, monkey
             result = await manager.install(update_id)
             assert result.state == "ROLLED_BACK" and result.failure_code == "INSTALLATION_FAILED"
             assert result.finished_at is not None
+            await assert_temporary_cleaned(rig.session, tmp_path, update_id)
             if failure == "after_db_changes":
                 assert observed_uncommitted == [(current.id, None)]
             await assert_device(rig, current.id, first.id, trusted_ids=[first.id, current.id])
             assert not (tmp_path / rig.files.storage_key(rig.device_id, update_id)).exists()
             assert (await event_types(update_id))[11:] == [
-                "INSTALL_STARTED", "INSTALL_FAILED", "ROLLBACK_STARTED", "ROLLBACK_COMPLETED",
+                "INSTALL_STARTED", "INSTALL_FAILED", "ROLLBACK_STARTED", "ROLLBACK_COMPLETED", "STORAGE_CLEANED",
             ]
 
     asyncio.run(exercise())
@@ -211,8 +221,9 @@ def test_failed_install_and_impossible_rollback(tmp_path, damage, expected):
                 rig.session, InstallerService(rig.session, rig.storage, FailingFiles(tmp_path)),
             ).install(update_id)
             assert result.state == "FAILED" and result.failure_code == expected
+            await assert_temporary_cleaned(rig.session, tmp_path, update_id)
             assert not (tmp_path / rig.files.storage_key(rig.device_id, update_id)).exists()
-            assert (await event_types(update_id))[-4:] == ["INSTALL_STARTED", "INSTALL_FAILED", "ROLLBACK_STARTED", "ROLLBACK_FAILED"]
+            assert (await event_types(update_id))[-5:] == ["INSTALL_STARTED", "INSTALL_FAILED", "ROLLBACK_STARTED", "ROLLBACK_FAILED", "STORAGE_CLEANED"]
             async with SessionFactory() as observer:
                 assert await observer.get(DeviceTrustedPackage, (rig.device_id, target.id)) is None
                 state = await observer.get(DeviceState, rig.device_id)
@@ -360,6 +371,52 @@ def test_concurrent_install_is_applied_once(tmp_path):
     asyncio.run(exercise())
 
 
+def test_cleanup_failure_keeps_successful_install_and_can_be_retried(tmp_path, monkeypatch):
+    async def exercise():
+        async with device_rig(tmp_path) as rig:
+            package, update = await rig.verified_release("1.0")
+            package_id, update_id = package.id, update.id
+            delete_files = rig.storage.files.delete
+
+            def unavailable_delete(key):
+                raise PermissionError("Test temporary file is locked")
+
+            monkeypatch.setattr(rig.storage.files, "delete", unavailable_delete)
+            result = await rig.manager.install(update_id)
+            assert result.state == "COMPLETED" and result.failure_code is None
+            await assert_device(rig, package_id, None, trusted_ids=[package_id])
+            row = await rig.session.get(TemporaryStorage, update_id, populate_existing=True)
+            assert row.cleaned_at is None
+            assert (tmp_path / row.storage_key).exists()
+            assert (await event_types(update_id))[-1] == "STORAGE_CLEANUP_FAILED"
+            monkeypatch.setattr(rig.storage.files, "delete", delete_files)
+            assert await rig.storage.cleanup_finished(update_id)
+            await assert_temporary_cleaned(rig.session, tmp_path, update_id)
+            cleaned_at = row.cleaned_at
+            assert await rig.storage.cleanup_finished(update_id)
+            assert row.cleaned_at == cleaned_at
+            events = await event_types(update_id)
+            assert events.count("INSTALL_COMPLETED") == events.count("STORAGE_CLEANED") == 1
+
+    asyncio.run(exercise())
+
+
+def test_cleanup_does_not_discard_verified_package_waiting_for_installer(tmp_path):
+    async def exercise():
+        async with device_rig(tmp_path) as rig:
+            _, update = await rig.verified_release("1.0")
+            update_id = update.id
+            with pytest.raises(TemporaryStorageError, match="finished update"):
+                await rig.storage.cleanup_finished(update_id)
+            row = await rig.session.get(TemporaryStorage, update_id)
+            assert row.state == "VERIFIED" and row.cleaned_at is None
+            path = tmp_path / row.storage_key
+            assert path.exists() and path.with_suffix(".meta").exists()
+            assert "STORAGE_CLEANED" not in await event_types(update_id)
+
+    asyncio.run(exercise())
+
+
 def test_http_run_install_and_rollback(tmp_path, monkeypatch):
     async def exercise():
         await engine.dispose()
@@ -371,11 +428,11 @@ def test_http_run_install_and_rollback(tmp_path, monkeypatch):
         try:
             async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
                 response = await client.post("/products", json={"name": f"block-d-api-{uuid4().hex}", "target": "test"},
-                                             headers={"X-Registry-Role": "publisher"})
+                                             headers={"Role": "publisher"})
                 assert response.status_code == 201
                 product_id = UUID(response.json()["id"])
                 first = await client.post(f"/products/{product_id}/packages", data={"version": "1.0"},
-                                          files={"file": ("test.pkg", b"first")}, headers={"X-Registry-Role": "publisher"})
+                                          files={"file": ("test.pkg", b"first")}, headers={"Role": "publisher"})
                 assert first.status_code == 201
                 trust.provision(TrainingSigner().public_key_bytes())
                 response = await client.post("/devices", json={"name": f"block-d-api-device-{uuid4().hex}",
@@ -387,7 +444,7 @@ def test_http_run_install_and_rollback(tmp_path, monkeypatch):
                 update_ids.append(UUID(result.json()["id"]))
                 assert result.json()["state"] == "COMPLETED"
                 second = await client.post(f"/products/{product_id}/packages", data={"version": "2.0"},
-                                           files={"file": ("test.pkg", b"second")}, headers={"X-Registry-Role": "publisher"})
+                                           files={"file": ("test.pkg", b"second")}, headers={"Role": "publisher"})
                 assert second.status_code == 201
                 downloaded = await client.post(f"/devices/{device_id}/updates/download")
                 assert downloaded.status_code == 201
@@ -397,6 +454,9 @@ def test_http_run_install_and_rollback(tmp_path, monkeypatch):
                 assert (await client.post(f"/updates/{update_id}/verify")).json()["verification_result"] == "PASSED"
                 installed = await client.post(f"/updates/{update_id}/install")
                 assert installed.status_code == 200 and installed.json()["state"] == "COMPLETED"
+                assert installed.json()["temporary_storage"]["cleaned_at"] is not None
+                path = TemporaryFileStore().root / f"temporary/{update_id.hex}.pkg"
+                assert not path.exists() and not path.with_suffix(".meta").exists()
                 assert (await client.post(f"/updates/{update_id}/install")).status_code == 409
                 state = (await client.get(f"/devices/{device_id}")).json()
                 assert (state["current_package_id"], state["fallback_package_id"]) == (second.json()["id"], first.json()["id"])

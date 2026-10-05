@@ -75,9 +75,9 @@ def test_registry_and_api_access_denials(monkeypatch):
                 await check_event("PackageRegistryService", "device", "publish_package")
                 for path in (f"/products/{resource_id}/latest", f"/devices/{resource_id}/updates/download"):
                     if path.endswith("download"):
-                        denied = await client.post(path, headers={"X-Registry-Role": "unknown"})
+                        denied = await client.post(path, headers={"Role": "unknown"})
                     else:
-                        denied = await client.get(path, headers={"X-Registry-Role": "unknown"})
+                        denied = await client.get(path, headers={"Role": "unknown"})
                     assert denied.status_code == 403
                     await check_event("RegistryAPI", "unknown", "resolve_role")
                 denied = await client.post(f"/devices/{resource_id}/updates/download")

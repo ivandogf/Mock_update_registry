@@ -134,6 +134,8 @@ class UpdateManagerService:
                 self._event(update, "INSTALL_FAILED", str(exc), error_type=type(exc).__name__)
                 await self._rollback(update, discard_failed_target=True)
             await self.session.commit()
+            await self.installer.storage.cleanup_finished(session_id)
+            await self.session.refresh(update)
             return update
         except Exception:
             await self.session.rollback()
@@ -168,6 +170,8 @@ class UpdateManagerService:
             if update.state == "ROLLED_BACK" and retry:
                 update.failure_code = "INSTALLATION_FAILED" if failed_install else None
             await self.session.commit()
+            await self.installer.storage.cleanup_finished(session_id)
+            await self.session.refresh(update)
             return update
         except Exception:
             await self.session.rollback()

@@ -5,6 +5,7 @@ from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
+from app.domain.enums import ScenarioType
 
 
 class ProductCreate(BaseModel):
@@ -90,6 +91,8 @@ class UpdateSessionRead(BaseModel):
     target_package_id: UUID | None
     verification_result: str | None
     failure_code: str | None
+    scenario_type: ScenarioType | None = None
+    scenario_config: dict[str, Any] | None = None
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None

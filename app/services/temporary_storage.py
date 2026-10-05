@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import TemporaryStorage, UpdateSession
 from app.domain.enums import TemporaryStorageState
 from app.domain.rules import (
-    AccessDeniedError, StorageActor, require_storage_access, require_storage_transition,
+    TERMINAL_UPDATE_STATES, AccessDeniedError, StorageActor, require_storage_access, require_storage_transition,
 )
 from app.infrastructure.files import TemporaryBundle, TemporaryFileStore
 from app.services.monitor import MonitorService
@@ -39,8 +39,6 @@ class TemporaryStorageService:
         row = result.scalar_one_or_none()
         if row is None:
             raise TemporaryStorageError("Temporary storage not found")
-        if row.cleaned_at is not None:
-            raise TemporaryStorageError("Temporary storage has been cleaned")
         return row
 
     def _event(self, session_id: UUID, event: str, message: str) -> None:
@@ -48,6 +46,7 @@ class TemporaryStorageService:
 
     async def _require_access(
         self, session_id: UUID, actor: StorageActor, operation: str, state: str,
+        *, cleaned_at: datetime | None = None,
     ) -> None:
         try:
             require_storage_access(actor, operation, state)
@@ -57,6 +56,8 @@ class TemporaryStorageService:
                 storage_state=state, message=str(exc),
             )
             raise
+        if cleaned_at is not None:
+            raise TemporaryStorageError("Temporary storage has been cleaned")
 
     async def create(
         self, session_id: UUID, manifest_bytes: bytes, signature: bytes,
@@ -81,7 +82,7 @@ class TemporaryStorageService:
 
     async def append(self, session_id: UUID, content: bytes, actor: StorageActor) -> TemporaryStorage:
         row = await self._locked(session_id)
-        await self._require_access(session_id, actor, "write", row.state)
+        await self._require_access(session_id, actor, "write", row.state, cleaned_at=row.cleaned_at)
         if row.bytes_written + len(content) > self.MAX_BYTES:
             raise TemporaryStorageError("Temporary package exceeds 16 MiB")
         self.files.append(row.storage_key, content, row.bytes_written)
@@ -91,7 +92,7 @@ class TemporaryStorageService:
 
     async def seal(self, session_id: UUID, actor: StorageActor) -> TemporaryStorage:
         row = await self._locked(session_id)
-        await self._require_access(session_id, actor, "seal", row.state)
+        await self._require_access(session_id, actor, "seal", row.state, cleaned_at=row.cleaned_at)
         require_storage_transition(row.state, "SEALED")
         if row.bytes_written == 0 or self.files.size(row.storage_key) != row.bytes_written:
             raise TemporaryStorageError("Cannot seal empty or incomplete storage")
@@ -103,7 +104,7 @@ class TemporaryStorageService:
 
     async def read(self, session_id: UUID, actor: StorageActor) -> TemporaryBundle:
         row = await self._locked(session_id)
-        await self._require_access(session_id, actor, "read", row.state)
+        await self._require_access(session_id, actor, "read", row.state, cleaned_at=row.cleaned_at)
         bundle = self.files.read(row.storage_key)
         if len(bundle.content) != row.bytes_written:
             raise StorageIntegrityError("Temporary file size differs from stored byte count")
@@ -113,7 +114,7 @@ class TemporaryStorageService:
         self, session_id: UUID, verified: bool, actor: StorageActor,
     ) -> TemporaryStorage:
         row = await self._locked(session_id)
-        await self._require_access(session_id, actor, "verify", row.state)
+        await self._require_access(session_id, actor, "verify", row.state, cleaned_at=row.cleaned_at)
         target = "VERIFIED" if verified else "REJECTED"
         require_storage_transition(row.state, target)
         row.state = target
@@ -138,3 +139,25 @@ class TemporaryStorageService:
         row.cleaned_at = datetime.now(timezone.utc)
         self._event(session_id, "STORAGE_CLEANED", "Temporary files removed")
         await self.session.flush()
+
+    async def cleanup_finished(self, session_id: UUID) -> bool:
+        """Commit cleanup after the update outcome is committed. Keep the audit/state history.
+
+        A filesystem cleanup error must not undo a successfully installed/trusted package.
+        Returns False on such an error; cleaned_at remains empty so cleanup can be retried.
+        """
+        update = await self.session.get(UpdateSession, session_id, populate_existing=True)
+        if update is None or update.state not in TERMINAL_UPDATE_STATES:
+            raise TemporaryStorageError("Automatic cleanup requires a finished update session")
+        try:
+            await self.cleanup(session_id, StorageActor.MANAGER)
+            await self.session.commit()
+        except (OSError, ValueError) as exc:
+            await self.session.rollback()
+            self.monitor.record(
+                "STORAGE_CLEANUP_FAILED", str(exc), component="TemporaryStorageService",
+                session_id=session_id, level="ERROR", details={"error_type": type(exc).__name__},
+            )
+            await self.session.commit()
+            return False
+        return True

@@ -10,6 +10,7 @@ from app.api.packages import get_role
 from app.api.schemas import AuditEventRead, TemporaryStorageRead, UpdateSessionRead
 from app.db.models import TemporaryStorage, UpdateSession
 from app.db.session import get_session
+from app.domain.enums import ScenarioType
 from app.domain.rules import AccessDeniedError, RegistryAction, RegistryRole
 from app.services.downloader import DownloadConflict, DownloaderService
 from app.services.gateway import ExternalNetworkGateway
@@ -18,6 +19,7 @@ from app.services.packages import RegistryNotFound, UpdateServerService
 from app.services.temporary_storage import TemporaryStorageError
 from app.services.verifier import VerificationConflict, VerifierService
 from app.services.update_manager import UpdateConflict, UpdateManagerService
+from app.services.scenarios import ScenarioConflict, ScenarioService
 
 router = APIRouter(tags=["Updates"])
 
@@ -129,6 +131,26 @@ async def run_update(
     except RegistryNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except (DownloadConflict, UpdateConflict) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return await session_response(session, update)
+
+
+@router.post("/devices/{device_id}/scenarios/{scenario_type}/run", response_model=UpdateSessionRead, status_code=201)
+async def run_scenario(
+    device_id: UUID, scenario_type: ScenarioType,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    role: Annotated[RegistryRole, Depends(get_role)],
+):
+    """Run one of four training faults. OUTDATED_VERSION and INSTALLATION_FAILURE require installed current.
+
+    INSTALLATION_FAILURE also requires a newer published release. Inspect the returned session and its events.
+    """
+    await authorize_update(session, role, device_id=str(device_id), scenario_type=scenario_type.value)
+    try:
+        update = await ScenarioService(session).run(device_id, scenario_type)
+    except RegistryNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ScenarioConflict, DownloadConflict, UpdateConflict) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return await session_response(session, update)
 

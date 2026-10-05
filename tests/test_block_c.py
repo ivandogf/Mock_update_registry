@@ -154,16 +154,19 @@ def test_verifier_checks_and_audit(tmp_path, monkeypatch, mode, expected):
                     events = [e.event_type for e in await MonitorService(observer).events_for_session(update_id)]
                     if expected == "PASSED":
                         assert stored.state == "VERIFIED" and stored.verified_at is not None
+                        assert stored.cleaned_at is None and payload_path.exists() and metadata_path.exists()
                         assert verified.state == "VERIFYING" and verified.failure_code is None
                         assert verified.finished_at is None
                         assert events[6:] == ["HASH_VALID", "SIGNATURE_VALID", "TARGET_VALID", "VERSION_VALID", "PACKAGE_VERIFIED"]
                     else:
                         assert stored.state == "REJECTED" and stored.verified_at is None
+                        assert stored.cleaned_at is not None
+                        assert not payload_path.exists() and not metadata_path.exists()
                         assert verified.state == "REJECTED" and verified.failure_code == expected
                         assert verified.finished_at is not None
                         order = ["HASH", "SIGNATURE", "TARGET", "VERSION"]
                         failed_index = order.index(expected.removesuffix("_INVALID"))
-                        assert events[6:] == [f"{check}_VALID" for check in order[:failed_index]] + [expected, "PACKAGE_REJECTED"]
+                        assert events[6:] == [f"{check}_VALID" for check in order[:failed_index]] + [expected, "PACKAGE_REJECTED", "STORAGE_CLEANED"]
                 with pytest.raises(AccessDeniedError):
                     await VerifierService(session, storage, trust).verify(update_id)
                 async with SessionFactory() as observer:
@@ -190,11 +193,11 @@ def test_http_verify(tmp_path, monkeypatch, expected):
         try:
             async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
                 created = await client.post("/products", json={"name": f"block-c-api-{uuid4().hex}", "target": "test"},
-                                            headers={"X-Registry-Role": "publisher"})
+                                            headers={"Role": "publisher"})
                 assert created.status_code == 201
                 product_id = UUID(created.json()["id"])
                 published = await client.post(f"/products/{product_id}/packages", data={"version": "1.0"},
-                                              files={"file": ("test.pkg", b"http-data")}, headers={"X-Registry-Role": "publisher"})
+                                              files={"file": ("test.pkg", b"http-data")}, headers={"Role": "publisher"})
                 assert published.status_code == 201
                 if expected != "SIGNATURE_INVALID":
                     trust.provision(TrainingSigner().public_key_bytes())
@@ -211,7 +214,8 @@ def test_http_verify(tmp_path, monkeypatch, expected):
                 assert verified.json()["verification_result"] == expected
                 assert verified.json()["temporary_storage"]["state"] == ("VERIFIED" if expected == "PASSED" else "REJECTED")
                 events = (await client.get(f"/updates/{update_id}/events")).json()
-                assert events[-1]["event_type"] == ("PACKAGE_VERIFIED" if expected == "PASSED" else "PACKAGE_REJECTED")
+                assert events[-1]["event_type"] == ("PACKAGE_VERIFIED" if expected == "PASSED" else "STORAGE_CLEANED")
+                assert (verified.json()["temporary_storage"]["cleaned_at"] is None) == (expected == "PASSED")
                 assert (await client.post(f"/updates/{update_id}/verify")).status_code == 409
                 assert (await client.post(f"/updates/{uuid4()}/verify")).status_code == 404
                 state = (await client.get(f"/devices/{device.json()['id']}")).json()

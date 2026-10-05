@@ -92,3 +92,9 @@ ACTIVE_UPDATE_STATES = {
     UpdateSessionState.IDLE, UpdateSessionState.CHECKING, UpdateSessionState.DOWNLOADING,
     UpdateSessionState.VERIFYING, UpdateSessionState.INSTALLING, UpdateSessionState.ROLLING_BACK,
 }
+
+
+TERMINAL_UPDATE_STATES = {
+    UpdateSessionState.COMPLETED, UpdateSessionState.NO_UPDATE, UpdateSessionState.REJECTED,
+    UpdateSessionState.FAILED, UpdateSessionState.ROLLED_BACK,
+}

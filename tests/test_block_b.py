@@ -260,11 +260,11 @@ def test_http_download_and_events():
         try:
             async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
                 created = await client.post("/products", json={"name": f"block-b-api-{uuid4().hex}", "target": "test"},
-                                            headers={"X-Registry-Role": "publisher"})
+                                            headers={"Role": "publisher"})
                 assert created.status_code == 201
                 product_id = UUID(created.json()["id"])
                 published = await client.post(f"/products/{product_id}/packages", data={"version": "1.0"},
-                                              files={"file": ("test.pkg", b"http-data")}, headers={"X-Registry-Role": "publisher"})
+                                              files={"file": ("test.pkg", b"http-data")}, headers={"Role": "publisher"})
                 assert published.status_code == 201
                 device_payload = {"name": f"api-device-{uuid4().hex}", "product_id": str(product_id), "target": "test"}
                 device = await client.post("/devices", json=device_payload)
