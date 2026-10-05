@@ -15,6 +15,8 @@ from app.services.downloader import DownloadConflict, DownloaderService
 from app.services.gateway import ExternalNetworkGateway
 from app.services.monitor import MonitorService
 from app.services.packages import RegistryNotFound, UpdateServerService
+from app.services.temporary_storage import TemporaryStorageError
+from app.services.verifier import VerificationConflict, VerifierService
 
 router = APIRouter(tags=["Updates"])
 
@@ -46,6 +48,29 @@ async def download_update(
     except RegistryNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except DownloadConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return await session_response(session, update)
+
+
+@router.post("/updates/{session_id}/verify", response_model=UpdateSessionRead)
+async def verify_update(
+    session_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    role: Annotated[RegistryRole, Depends(get_role)],
+):
+    """Verify SEALED storage. Returns PASSED or a rejection without starting installation."""
+    try:
+        await MonitorService(session).require_access(
+            role, RegistryAction.READ_RELEASE, component="UpdatesAPI",
+            details={"session_id": str(session_id)},
+        )
+    except AccessDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    try:
+        update = await VerifierService(session).verify(session_id)
+    except RegistryNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (AccessDeniedError, VerificationConflict, TemporaryStorageError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return await session_response(session, update)
 

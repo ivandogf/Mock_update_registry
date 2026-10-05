@@ -52,6 +52,10 @@ class TemporaryBundle:
     signing_key_id: str
 
 
+class BundleReadError(ValueError):
+    """The payload or manifest cannot be read from temporary storage."""
+
+
 class TemporaryFileStore:
     def __init__(self, root: Path = STORAGE_ROOT) -> None:
         self.root = root.resolve()
@@ -98,12 +102,22 @@ class TemporaryFileStore:
 
     def read(self, key: str) -> TemporaryBundle:
         path = self._path(key)
-        metadata = json.loads(path.with_suffix(".meta").read_text(encoding="utf-8"))
+        try:
+            content = path.read_bytes()
+            metadata = json.loads(path.with_suffix(".meta").read_text(encoding="utf-8"))
+            manifest = base64.b64decode(metadata["manifest"], validate=True)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise BundleReadError("Temporary payload or manifest is missing or malformed") from exc
+        try:
+            signature = base64.b64decode(metadata["signature"], validate=True)
+        except (ValueError, KeyError, TypeError):
+            # Keep hash verification first; malformed signatures fail its next stage.
+            signature = b""
         return TemporaryBundle(
-            content=path.read_bytes(),
-            manifest_bytes=base64.b64decode(metadata["manifest"], validate=True),
-            signature=base64.b64decode(metadata["signature"], validate=True),
-            signing_key_id=metadata["signing_key_id"],
+            content=content,
+            manifest_bytes=manifest,
+            signature=signature,
+            signing_key_id=metadata.get("signing_key_id", ""),
         )
 
     def delete(self, key: str) -> None:

@@ -19,6 +19,10 @@ class TemporaryStorageError(Exception):
     pass
 
 
+class StorageIntegrityError(TemporaryStorageError):
+    pass
+
+
 class TemporaryStorageService:
     MAX_BYTES = 16 * 1024 * 1024
 
@@ -102,7 +106,7 @@ class TemporaryStorageService:
         await self._require_access(session_id, actor, "read", row.state)
         bundle = self.files.read(row.storage_key)
         if len(bundle.content) != row.bytes_written:
-            raise TemporaryStorageError("Temporary file size differs from stored byte count")
+            raise StorageIntegrityError("Temporary file size differs from stored byte count")
         return bundle
 
     async def set_verification_result(

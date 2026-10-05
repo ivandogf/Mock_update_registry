@@ -8,7 +8,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import delete, select, text
 
 from app.db.models import (
-    AuditEvent, Device, DeviceState, Package, Product, ServerReleaseHead,
+    AuditEvent, Device, DeviceState, DeviceTrustedPackage, Package, Product, ServerReleaseHead,
     TemporaryStorage, UpdateSession,
 )
 from app.db.session import SessionFactory, engine
@@ -31,6 +31,7 @@ async def remove_test_product(product_id):
         await session.execute(delete(TemporaryStorage).where(TemporaryStorage.session_id.in_(session_ids)))
         await session.execute(delete(UpdateSession).where(UpdateSession.device_id.in_(device_ids)))
         await session.execute(delete(DeviceState).where(DeviceState.device_id.in_(device_ids)))
+        await session.execute(delete(DeviceTrustedPackage).where(DeviceTrustedPackage.device_id.in_(device_ids)))
         await session.execute(delete(Device).where(Device.product_id == product_id))
         keys = list((await session.scalars(select(Package.storage_key).where(Package.product_id == product_id))))
         await session.execute(delete(ServerReleaseHead).where(ServerReleaseHead.product_id == product_id))
